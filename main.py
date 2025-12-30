@@ -20,13 +20,8 @@ SCHEDULE_URLS: list[str] = load_schedule_urls()
 
 def isCourseAvailable(courseDict : dict) -> bool:
 
-    if "labTotalSeats" in courseDict:
-        return ((courseDict["lectureTakenSeats"] < courseDict["lectureTotalSeats"]) and
-                (courseDict["labTakenSeats"] < courseDict["labTotalSeats"]))
-
-    elif "lectureTotalSeats" in courseDict:
-        return courseDict["lectureTakenSeats"] < courseDict["lectureTotalSeats"]
-
+    if "isFull" in courseDict:
+        return not courseDict["isFull"]
     else:
         raise Exception("Invalid Course Info")
 
@@ -51,6 +46,9 @@ def getCourseInfo(courseHTML : str) -> dict:
 
     # Get the course name
     courseInfo["name"] = soup.find("h4", {"class": "course_title"}).text + " " + seatTypeDiv[0].text
+
+    # Check if the course is full by label
+    courseInfo["isFull"] : bool = soup.find("span", {"class": "fullText"}) != None
 
     # Parse text from HTML tag
     for i in range(0, len(seatDivs)):
@@ -124,8 +122,6 @@ def getScheduleAvailability(SCHEDULE_URL : str, print_info = False):
 def sendDiscordWebhook(className : str):
     webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=f"@everyone {className} is available!!!")
     webhook.execute()
-
-
 
 def main():
 
