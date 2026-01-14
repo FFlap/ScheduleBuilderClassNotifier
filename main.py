@@ -89,23 +89,37 @@ def getScheduleAvailability(SCHEDULE_URL : str, print_info = False):
 
     # Define Selenium to be headless
     options = ChromeOptions()
-    options.add_argument("--headless=new")
-    driver = webdriver.Chrome(options=options)
-
-    # Load Website Dynamically
-    driver.get(SCHEDULE_URL)
-
-    # Found Course Divs
     scheduleDict : dict = dict()
     courseDiv : list = []
 
-    # Wait for the page to load and get each course body
-    while not courseDiv:
-        soup = BeautifulSoup(driver.page_source, 'lxml')
-        courseDiv = soup.find_all("div", {"class": "td course_cell_legend one_col"})
+    while True:
+        try:
+            # Define Selenium to be headless
+            options = ChromeOptions()
+            options.add_argument("--headless=new")
+            driver = webdriver.Chrome(options=options)
 
-    # Exit out of Chromium
-    driver.quit()
+            # Load Website Dynamically
+            driver.get(SCHEDULE_URL)
+
+            # Found Course Divs
+            courseDiv : list = []
+
+            # Wait for the page to load and get each course body
+            while not courseDiv:
+                soup = BeautifulSoup(driver.page_source, 'lxml')
+                courseDiv = soup.find_all("div", {"class": "td course_cell_legend one_col"})
+
+            # Exit out of Chromium
+            driver.quit()
+            break
+        except:
+            print("Error: Failed to fetch the url data, retrying")
+            try:
+                driver.quit()
+            except:
+                pass
+            continue
 
 
     # Iterate though each course and get its info
