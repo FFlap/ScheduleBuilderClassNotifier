@@ -87,10 +87,7 @@ def getCourseInfo(courseHTML : str) -> dict:
 
 def getScheduleAvailability(SCHEDULE_URL : str, print_info = False):
 
-    # Define Selenium to be headless
-    options = ChromeOptions()
     scheduleDict : dict = dict()
-    courseDiv : list = []
 
     while True:
         try:
