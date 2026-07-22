@@ -2,6 +2,7 @@
 
 # Built-In
 import random
+import re
 import time
 
 
@@ -18,72 +19,84 @@ from config import DISCORD_WEBHOOK_URL, load_schedule_urls
 SCHEDULE_URLS: list[str] = load_schedule_urls()
 
 
-def isCourseAvailable(courseDict : dict) -> bool:
+RESERVED_SEAT_PATTERN = re.compile(r"(\d+)\s+taken of\s+(\d+)\s+seats reserved")
 
-    if "isFull" in courseDict:
-        return not courseDict["isFull"]
-    else:
+
+def isCourseAvailable(courseInfo : dict) -> bool:
+    if "generalSeatsAvailable" not in courseInfo:
         raise Exception("Invalid Course Info")
+
+    return courseInfo["generalSeatsAvailable"] > 0
+
+
+def sumReservedSeats(node) -> tuple[int, int]:
+    reservedTaken : int = 0
+    reservedTotal : int = 0
+
+    for rcap in node.find_all("div", {"class": "rcapInfo"}):
+        match = RESERVED_SEAT_PATTERN.search(rcap.text)
+        if match:
+            reservedTaken += int(match.group(1))
+            reservedTotal += int(match.group(2))
+
+    return reservedTaken, reservedTotal
+
+
+def parseComponents(soup) -> list[dict]:
+    components : list[dict] = []
+
+    for typeBlock in soup.find_all("strong", {"class": "type_block"}):
+        label : str = typeBlock.text.strip()
+
+        # The remarks header shares the type_block styling but is not a component.
+        if label == "Class Remarks:":
+            continue
+
+        componentCell = typeBlock.find_parent("td")
+        seatText = componentCell.find("span", {"class": "seatText"})
+        if seatText is None:
+            continue
+
+        takenSeats, totalSeats = (int(part) for part in seatText.text.split("/"))
+
+        # Reserved seats
+        remarksRow = componentCell.find_parent("tr").find_next_sibling("tr")
+        reservedTaken, reservedTotal = sumReservedSeats(remarksRow) if remarksRow else (0, 0)
+
+        # Seats a student in no reserved category can actually take.
+        generalAvailable : int = (totalSeats - reservedTotal) - (takenSeats - reservedTaken)
+
+        components.append({
+            "label": label,
+            "type": label.split()[0],
+            "takenSeats": takenSeats,
+            "totalSeats": totalSeats,
+            "reservedTaken": reservedTaken,
+            "reservedTotal": reservedTotal,
+            "generalAvailable": generalAvailable,
+        })
+
+    return components
 
 
 def getCourseInfo(courseHTML : str) -> dict:
 
-
-    # Initialize Variables
-    courseInfo : dict = dict()
-
-
-    # Use BeautifulSoup on Course HTML
     soup = BeautifulSoup(courseHTML, 'lxml')
 
-    # Get Course Types and Sections
-    seatTypeDiv : list = soup.find_all("strong", {"class" : "leftnclear type_block"})
+    components : list[dict] = parseComponents(soup)
+    if not components:
+        raise Exception("Invalid Class: no components found")
 
-    # Get Number of Seats
-    seatDivs : list = soup.find_all("span", {"class": "seatText"})
+    courseCode : str = soup.find("h4", {"class": "course_title"}).text.strip()
 
+    generalSeatsAvailable : int = min(component["generalAvailable"] for component in components)
 
-
-    # Get the course name
-    courseInfo["name"] = soup.find("h4", {"class": "course_title"}).text + " " + seatTypeDiv[0].text
-
-    # Check if the course is full by label
-    courseInfo["isFull"] : bool = soup.find("span", {"class": "fullText"}) != None
-
-    # Parse text from HTML tag
-    for i in range(0, len(seatDivs)):
-        seatDivs[i] = seatDivs[i].text
-
-    # Check if course has more than a lecture portion
-    if (len(seatDivs) == 2):
-
-        # Add the Extra Course Type to Name:
-        courseInfo["name"] += " " + seatTypeDiv[-2].text
-
-        # Correctly define what is the lecture portion vs what is a lab
-        if int(seatDivs[0].split("/")[1]) > int(seatDivs[1].split("/")[1]):
-            courseInfo["lectureTakenSeats"] = int(seatDivs[0].split("/")[0])
-            courseInfo["lectureTotalSeats"] = int(seatDivs[0].split("/")[1])
-
-            courseInfo["labTakenSeats"] = int(seatDivs[1].split("/")[0])
-            courseInfo["labTotalSeats"] = int(seatDivs[1].split("/")[1])
-        else:
-            courseInfo["labTakenSeats"] = int(seatDivs[0].split("/")[0])
-            courseInfo["labTotalSeats"] = int(seatDivs[0].split("/")[1])
-
-            courseInfo["lectureTakenSeats"] = int(seatDivs[1].split("/")[0])
-            courseInfo["lectureTotalSeats"] = int(seatDivs[1].split("/")[1])
-
-    # Only Lecture Portion
-    elif (len(seatDivs) == 1):
-        courseInfo["lectureTakenSeats"] = int(seatDivs[0].split("/")[0])
-        courseInfo["lectureTotalSeats"] = int(seatDivs[0].split("/")[1])
-
-    # Invalid Class
-    else:
-        raise Exception("Invalid Class")
-
-    return courseInfo
+    return {
+        "name": courseCode + " (" + " / ".join(c["label"] for c in components) + ")",
+        "isFull": soup.find("span", {"class": "fullText"}) is not None,
+        "components": components,
+        "generalSeatsAvailable": generalSeatsAvailable,
+    }
 
 def getScheduleAvailability(SCHEDULE_URL : str, print_info = False):
 
