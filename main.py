@@ -7,13 +7,13 @@ import time
 
 
 # Installed
-from discord_webhook import DiscordWebhook
+import requests
 from selenium.webdriver import ChromeOptions
 from selenium import webdriver
 from bs4 import BeautifulSoup
 
 # Local
-from config import DISCORD_WEBHOOK_URL, load_schedule_urls
+from config import NTFY_TOPIC_URL, load_schedule_urls
 
 
 SCHEDULE_URLS: list[str] = load_schedule_urls()
@@ -143,9 +143,19 @@ def getScheduleAvailability(SCHEDULE_URL : str, print_info = False):
 
     return scheduleDict
 
-def sendDiscordWebhook(className : str):
-    webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL, content=f"@everyone {className} is available!!!")
-    webhook.execute()
+def sendNtfyNotification(className : str):
+    try:
+        response = requests.post(
+            NTFY_TOPIC_URL,
+            data=f"{className} is available!".encode("utf-8"),
+            headers={
+                "Title": "U of A Course Available",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+    except requests.RequestException as error:
+        print(f"Error: Failed to send ntfy notification: {error}")
 
 def main():
 
@@ -165,10 +175,10 @@ def main():
             for course in scheduleAvailability:
 
                 # Check if course is available
-                if (scheduleAvailability[course]): sendDiscordWebhook(course)
+                if (scheduleAvailability[course]): sendNtfyNotification(course)
 
         # Random Time Intervals
-        randomMinuteInterval : int = random.randint(5, 15)
+        randomMinuteInterval : int = random.randint(5, 10)
         randomSecInterval : int = random.randint(0,30)
 
         print(f"Waiting {randomMinuteInterval} minutes and {randomSecInterval} seconds")

@@ -39,4 +39,4 @@ def load_schedule_urls(path: Path | str | None = None) -> list[str]:
 
 
 _load_env_file(Path(__file__).with_name(".env"))
-DISCORD_WEBHOOK_URL: str = _load_env_var("DISCORD_WEBHOOK_URL")
+NTFY_TOPIC_URL: str = _load_env_var("NTFY_TOPIC_URL")
