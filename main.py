@@ -1,188 +1,183 @@
-# Imports
-
-# Built-In
-import random
-import re
+import json
 import time
+import xml.etree.ElementTree as ET
+from urllib.parse import parse_qs, urljoin, urlparse
 
-
-# Installed
 import requests
-from selenium.webdriver import ChromeOptions
-from selenium import webdriver
-from bs4 import BeautifulSoup
 
-# Local
 from config import NTFY_TOPIC_URL, load_schedule_urls
 
 
 SCHEDULE_URLS: list[str] = load_schedule_urls()
 
 
-RESERVED_SEAT_PATTERN = re.compile(r"(\d+)\s+taken of\s+(\d+)\s+seats reserved")
-
-
-def isCourseAvailable(courseInfo : dict) -> bool:
+def isCourseAvailable(courseInfo: dict) -> bool:
     if "generalSeatsAvailable" not in courseInfo:
-        raise Exception("Invalid Course Info")
+        raise ValueError("Invalid course info")
 
     return courseInfo["generalSeatsAvailable"] > 0
 
 
-def sumReservedSeats(node) -> tuple[int, int]:
-    reservedTaken : int = 0
-    reservedTotal : int = 0
-
-    for rcap in node.find_all("div", {"class": "rcapInfo"}):
-        match = RESERVED_SEAT_PATTERN.search(rcap.text)
-        if match:
-            reservedTaken += int(match.group(1))
-            reservedTotal += int(match.group(2))
-
-    return reservedTaken, reservedTotal
+def _clock_parameters() -> tuple[int, int]:
+    """Reproduce the short-lived clock check used by My Schedule Builder."""
+    minute_window = int(time.time() // 60) % 1000
+    check = minute_window % 3 + minute_window % 39 + minute_window % 42
+    return minute_window, check
 
 
-def parseComponents(soup) -> list[dict]:
-    components : list[dict] = []
+def _parse_schedule_url(
+    schedule_url: str,
+) -> tuple[str, list[dict], dict[str, str | int]]:
+    parsed_url = urlparse(schedule_url)
+    query = parse_qs(parsed_url.query, keep_blank_values=True)
+    term = query.get("term", [""])[0]
+    if not term:
+        raise ValueError("Schedule URL is missing its term")
 
-    for typeBlock in soup.find_all("strong", {"class": "type_block"}):
-        label : str = typeBlock.text.strip()
+    courses: list[dict] = []
+    index = 0
+    while f"course_{index}_0" in query:
+        course_key = query[f"course_{index}_0"][0]
+        selection_key = query.get(f"cs_{index}_0", [""])[0]
+        if not selection_key:
+            raise ValueError(f"Schedule URL is missing a selected section for {course_key}")
 
-        # The remarks header shares the type_block styling but is not a component.
-        if label == "Class Remarks:":
-            continue
+        courses.append({
+            "courseKey": course_key,
+            "selectionKey": selection_key,
+        })
+        index += 1
 
-        componentCell = typeBlock.find_parent("td")
-        seatText = componentCell.find("span", {"class": "seatText"})
-        if seatText is None:
-            continue
+    if not courses:
+        raise ValueError("Schedule URL does not contain any courses")
 
-        takenSeats, totalSeats = (int(part) for part in seatText.text.split("/"))
+    minute_window, clock_check = _clock_parameters()
+    params: dict[str, str | int] = {
+        "term": term,
+        "t": minute_window,
+        "e": clock_check,
+        "nouser": 1,
+    }
 
-        # Reserved seats
-        remarksRow = componentCell.find_parent("tr").find_next_sibling("tr")
-        reservedTaken, reservedTotal = sumReservedSeats(remarksRow) if remarksRow else (0, 0)
+    for index, course in enumerate(courses):
+        params[f"course_{index}_0"] = course["courseKey"]
+        params[f"va_{index}_0"] = query.get(f"va_{index}_0", [""])[0]
+        params[f"rq_{index}_0"] = query.get(f"rq_{index}_0", [""])[0]
+        if f"seq_{index}_0" in query:
+            params[f"seq_{index}_0"] = query[f"seq_{index}_0"][0]
 
-        # Seats a student in no reserved category can actually take.
-        generalAvailable : int = (totalSeats - reservedTotal) - (takenSeats - reservedTaken)
+    api_url = urljoin(schedule_url, "/api/class-data")
+    return api_url, courses, params
+
+
+def _reserved_seats(block: ET.Element) -> tuple[int, int]:
+    extended_attributes = block.get("eattrs", "")
+    if not extended_attributes:
+        return 0, 0
+
+    try:
+        reservations = json.loads(extended_attributes).get("rcaps", [])
+    except (json.JSONDecodeError, AttributeError) as error:
+        raise ValueError("Invalid reserved-seat data returned by class-data") from error
+
+    reserved_taken = sum(int(reservation.get("enrlTot", 0)) for reservation in reservations)
+    reserved_total = sum(int(reservation.get("cap", 0)) for reservation in reservations)
+    return reserved_taken, reserved_total
+
+
+def _parse_course(course_node: ET.Element, selection_key: str) -> dict:
+    selection = course_node.find(f".//selection[@key='{selection_key}']")
+    if selection is None:
+        raise ValueError(
+            f"Selected sections {selection_key!r} were not returned for {course_node.get('key')}"
+        )
+
+    components: list[dict] = []
+    for block in selection.findall("block"):
+        total_seats = int(block.get("me", "0"))
+        open_seats = int(block.get("os", "0"))
+        reserved_taken, reserved_total = _reserved_seats(block)
+
+        # Seats usable by a student who belongs to no reserved category.
+        general_available = open_seats - (reserved_total - reserved_taken)
+        label = block.get("disp") or " ".join(
+            part for part in (block.get("type"), block.get("secNo")) if part
+        )
 
         components.append({
             "label": label,
-            "type": label.split()[0],
-            "takenSeats": takenSeats,
-            "totalSeats": totalSeats,
-            "reservedTaken": reservedTaken,
-            "reservedTotal": reservedTotal,
-            "generalAvailable": generalAvailable,
+            "type": block.get("type", ""),
+            "takenSeats": total_seats - open_seats,
+            "totalSeats": total_seats,
+            "reservedTaken": reserved_taken,
+            "reservedTotal": reserved_total,
+            "generalAvailable": general_available,
         })
 
-    return components
-
-
-def getCourseInfo(courseHTML : str) -> dict:
-
-    soup = BeautifulSoup(courseHTML, 'lxml')
-
-    components : list[dict] = parseComponents(soup)
     if not components:
-        raise Exception("Invalid Class: no components found")
+        raise ValueError(f"No components returned for {course_node.get('key')}")
 
-    courseCode : str = soup.find("h4", {"class": "course_title"}).text.strip()
-
-    generalSeatsAvailable : int = min(component["generalAvailable"] for component in components)
-
+    course_code = course_node.get("key", "Unknown course")
     return {
-        "name": courseCode + " (" + " / ".join(c["label"] for c in components) + ")",
-        "isFull": soup.find("span", {"class": "fullText"}) is not None,
+        "name": f"{course_code} ({' / '.join(component['label'] for component in components)})",
+        "isFull": any(block.get("isFull") == "1" for block in selection.findall("block")),
         "components": components,
-        "generalSeatsAvailable": generalSeatsAvailable,
+        "generalSeatsAvailable": min(
+            component["generalAvailable"] for component in components
+        ),
     }
 
-def getScheduleAvailability(SCHEDULE_URL : str, print_info = False):
 
-    scheduleDict : dict = dict()
+def getScheduleAvailability(schedule_url: str, print_info: bool = False) -> dict[str, bool]:
+    api_url, requested_courses, params = _parse_schedule_url(schedule_url)
+    response = requests.get(api_url, params=params, timeout=30)
+    response.raise_for_status()
 
-    while True:
-        try:
-            # Define Selenium to be headless
-            options = ChromeOptions()
-            options.add_argument("--headless=new")
-            driver = webdriver.Chrome(options=options)
+    try:
+        root = ET.fromstring(response.content)
+    except ET.ParseError as error:
+        raise ValueError("class-data returned invalid XML") from error
 
-            # Load Website Dynamically
-            driver.get(SCHEDULE_URL)
+    errors = [message.strip() for message in root.itertext() if message.strip()] \
+        if root.find("errors/error") is not None else []
+    if errors:
+        raise RuntimeError("class-data error: " + "; ".join(errors))
 
-            # Found Course Divs
-            courseDiv : list = []
+    course_nodes = {node.get("key"): node for node in root.findall(".//course")}
+    availability: dict[str, bool] = {}
+    for requested_course in requested_courses:
+        course_key = requested_course["courseKey"]
+        course_node = course_nodes.get(course_key)
+        if course_node is None:
+            raise ValueError(f"class-data did not return {course_key}")
 
-            # Wait for the page to load and get each course body
-            while not courseDiv:
-                soup = BeautifulSoup(driver.page_source, 'lxml')
-                courseDiv = soup.find_all("div", {"class": "td course_cell_legend one_col"})
+        course_info = _parse_course(course_node, requested_course["selectionKey"])
+        if print_info:
+            print(course_info)
+        availability[course_info["name"]] = isCourseAvailable(course_info)
 
-            # Exit out of Chromium
-            driver.quit()
-            break
-        except:
-            print("Error: Failed to fetch the url data, retrying")
-            try:
-                driver.quit()
-            except:
-                pass
-            continue
+    return availability
 
 
-    # Iterate though each course and get its info
-    for courseHTML in courseDiv:
-        courseInfo : dict = getCourseInfo(str(courseHTML))
-
-        if print_info: print(courseInfo)
-
-        # Add if the course is available or not
-        scheduleDict[courseInfo["name"]] = isCourseAvailable(courseInfo)
-
-    return scheduleDict
-
-def sendNtfyNotification(className : str):
+def sendNtfyNotification(className: str) -> None:
     try:
         response = requests.post(
             NTFY_TOPIC_URL,
             data=f"{className} is available!".encode("utf-8"),
-            headers={
-                "Title": "U of A Course Available",
-            },
+            headers={"Title": "U of A Course Available"},
             timeout=30,
         )
         response.raise_for_status()
     except requests.RequestException as error:
         print(f"Error: Failed to send ntfy notification: {error}")
 
-def main():
 
-    numChecks : int = 0
-    while True:
-        numChecks += 1
-
-        print(f"Check Number: {numChecks}")
-
-
-        for scheduleUrl in SCHEDULE_URLS:
-
-            # Get availability of each course
-            scheduleAvailability : dict = getScheduleAvailability(scheduleUrl, True)
-
-            # Iterate through all the courses in the schedule and notify if course is available
-            for course in scheduleAvailability:
-
-                # Check if course is available
-                if (scheduleAvailability[course]): sendNtfyNotification(course)
-
-        # Random Time Intervals
-        randomMinuteInterval : int = random.randint(5, 10)
-        randomSecInterval : int = random.randint(0,30)
-
-        print(f"Waiting {randomMinuteInterval} minutes and {randomSecInterval} seconds")
-        time.sleep((randomMinuteInterval * 60) + randomSecInterval)
+def main() -> None:
+    for schedule_url in SCHEDULE_URLS:
+        schedule_availability = getScheduleAvailability(schedule_url, True)
+        for course, is_available in schedule_availability.items():
+            if is_available:
+                sendNtfyNotification(course)
 
 
 if __name__ == "__main__":

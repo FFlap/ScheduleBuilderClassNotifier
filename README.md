@@ -5,7 +5,6 @@ schedule builders, but it should work if they have the same UI.
 
 ## Prerequisites
 - Python 3.10+
-- Google Chrome and a matching ChromeDriver (may need to install ChromeDriver separately)
 
 ## Setup
 1. Clone or download this repository.
@@ -31,4 +30,4 @@ Run the notifier:
 python main.py
 ```
 
-The script runs headless Chrome, checks each URL, and posts to the ntfy topic when a course shows available seats. It waits a random 5–10 minutes (plus 0–30 seconds) between checks to avoid spam and detection.
+The script queries My Schedule Builder's class-data endpoint, checks each URL, posts to the ntfy topic when a course shows available seats, and then exits. Schedule it with cron or another job runner to check repeatedly.
